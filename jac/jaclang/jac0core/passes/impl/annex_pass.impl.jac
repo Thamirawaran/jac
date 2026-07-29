@@ -26,6 +26,16 @@ impl JacAnnexPass._merge_annex_group(
     for path in discover_annex_files(base_path, '.impl.jac') {
         self._merge_annex(nd, path, ctx_path, seen);
     }
+    # A build compiles a program, not its test suite. Merging '.test.jac' pulls
+    # the tests' imports into the module, and a single `import subprocess` in an
+    # annex is enough to keep an otherwise native module off the native
+    # backend, so nacompile reports the program as incompatible while every
+    # construct in it compiles fine. `jac test` leaves this unset and still
+    # sees its annexes.
+    import os;
+    if os.environ.get("JAC_BUILD_NO_TEST_ANNEX") == "1" {
+        return;
+    }
     for path in discover_annex_files(base_path, '.test.jac') {
         self._merge_annex(nd, path, ctx_path, seen);
     }

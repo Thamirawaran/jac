@@ -867,9 +867,12 @@ def _native_default_dep_scan(path: str) -> (tuple[str, list[str]] | None) {
         discover_variant_files
     }
     import from jaclang.jac0core.parser { parse as rd_parse }
-    files = [path] + discover_annex_files(path, '.impl.jac') + discover_annex_files(
-        path, '.test.jac'
-    );
+    # Deliberately excludes '.test.jac': a test annex is not part of the program,
+    # and its imports must not decide the module's codespace. One `import
+    # subprocess` in an annex was enough to place an otherwise native module on
+    # the server, after which nacompile reported the program as
+    # native-incompatible while every construct in it compiled fine.
+    files = [path] + discover_annex_files(path, '.impl.jac');
     fresh_parts: list[tuple] = [];
     for f in files {
         try {

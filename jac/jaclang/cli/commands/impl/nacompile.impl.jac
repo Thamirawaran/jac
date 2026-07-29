@@ -175,6 +175,9 @@ impl nacompile(
     }
 
     _prev_native_debug = os.environ.get("JAC_NATIVE_DEBUG") if debug else None;
+    # Tests are not part of the program being built; see JacAnnexPass.
+    _prev_no_test_annex = os.environ.get("JAC_BUILD_NO_TEST_ANNEX");
+    os.environ["JAC_BUILD_NO_TEST_ANNEX"] = "1";
     if debug {
         os.environ["JAC_NATIVE_DEBUG"] = "1";
         scrub = True;
@@ -265,6 +268,11 @@ impl nacompile(
         traceback.print_exc();
         return 1;
     } finally {
+        if _prev_no_test_annex is None {
+            os.environ.pop("JAC_BUILD_NO_TEST_ANNEX", None);
+        } else {
+            os.environ["JAC_BUILD_NO_TEST_ANNEX"] = _prev_no_test_annex;
+        }
         if debug {
             if _prev_native_debug is None {
                 os.environ.pop("JAC_NATIVE_DEBUG", None);

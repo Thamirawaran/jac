@@ -232,6 +232,85 @@ impl NaIRGenPass._emit_os_call(name: str, nd: uni.FuncCall) -> (ir.Value | None)
         return None;
     }
 
+    if name == "listdir" and params {
+        p = self._codegen_expr(params[0]);
+        if p is None {
+            return None;
+        }
+        layout = self._stat_offsets();
+        i8p_l = ir.IntType(8).as_pointer();
+        self._emit_list_helpers("ptr", i8p_l);
+        helpers = self.list_helpers["ptr"];
+        _loc = f"{os.path.basename(self.ir_in.loc.mod_path)}:{nd.loc.first_line
+            if nd.loc
+            else 0}";
+
+        opendir_fn = self._get_or_declare_extern("opendir", i8p, [i8p]);
+        readdir_fn = self._get_or_declare_extern("readdir", i8p, [i8p]);
+        closedir_fn = self._get_or_declare_extern("closedir", i32, [i8p]);
+
+        listv = self._rc_call_with_ctx(
+            helpers["new"], [], op="new", loc=_loc, name="listdir.new"
+        );
+        dirp = self.builder.call(opendir_fn, [p], name="listdir.opendir");
+
+        func = self.builder.function;
+        loop_bb = func.append_basic_block(name="listdir.loop");
+        body_bb = func.append_basic_block(name="listdir.body");
+        keep_bb = func.append_basic_block(name="listdir.keep");
+        close_bb = func.append_basic_block(name="listdir.close");
+        done_bb = func.append_basic_block(name="listdir.done");
+
+        opened = self.builder.icmp_signed(
+            "!=", dirp, ir.Constant(i8p, None), name="listdir.opened"
+        );
+        self.builder.cbranch(opened, loop_bb, done_bb);
+
+        self.builder.position_at_end(loop_bb);
+        ent = self.builder.call(readdir_fn, [dirp], name="listdir.readdir");
+        more = self.builder.icmp_signed(
+            "!=", ent, ir.Constant(i8p, None), name="listdir.more"
+        );
+        self.builder.cbranch(more, body_bb, close_bb);
+
+        self.builder.position_at_end(body_bb);
+        namep = self.builder.gep(
+            ent, [ir.Constant(i64, layout["dname"])], name="listdir.namep"
+        );
+        b0 = self.builder.load(namep, name="listdir.b0");
+        p1 = self.builder.gep(namep, [ir.Constant(i64, 1)], name="listdir.p1");
+        b1 = self.builder.load(p1, name="listdir.b1");
+        p2 = self.builder.gep(namep, [ir.Constant(i64, 2)], name="listdir.p2");
+        b2 = self.builder.load(p2, name="listdir.b2");
+        dot = ir.Constant(i8, 46);
+        nul = ir.Constant(i8, 0);
+        is_dot0 = self.builder.icmp_signed("==", b0, dot, name="listdir.isdot0");
+        is_end1 = self.builder.icmp_signed("==", b1, nul, name="listdir.isend1");
+        is_dot1 = self.builder.icmp_signed("==", b1, dot, name="listdir.isdot1");
+        is_end2 = self.builder.icmp_signed("==", b2, nul, name="listdir.isend2");
+        dotdot = self.builder.and_(is_dot1, is_end2, name="listdir.dotdot");
+        selfref = self.builder.or_(is_end1, dotdot, name="listdir.selfref");
+        is_self = self.builder.and_(is_dot0, selfref, name="listdir.selfentry");
+        self.builder.cbranch(is_self, loop_bb, keep_bb);
+
+        self.builder.position_at_end(keep_bb);
+        nameval = self._rc_strdup(namep, name="listdir.name");
+        self._rc_call_with_ctx(
+            helpers["append"], [listv, nameval], op="list_init", loc=_loc
+        );
+        if self._is_owned(nameval) {
+            self._emit_rc_release_simple(nameval, op="list_init", loc=_loc);
+        }
+        self.builder.branch(loop_bb);
+
+        self.builder.position_at_end(close_bb);
+        self.builder.call(closedir_fn, [dirp], name="listdir.closedir");
+        self.builder.branch(done_bb);
+
+        self.builder.position_at_end(done_bb);
+        return listv;
+    }
+
     if name == "rename" and len(params) >= 2 {
         src = self._codegen_expr(params[0]);
         dst = self._codegen_expr(params[1]);
@@ -401,29 +480,227 @@ impl NaIRGenPass._emit_ospath_call(name: str, nd: uni.FuncCall) -> (ir.Value | N
         );
     }
 
+    if name == "islink" and params {
+        p = self._codegen_expr(params[0]);
+        if p is None {
+            return None;
+        }
+        layout = self._stat_offsets();
+        mode = self._emit_stat_field(p, layout["mode"], layout["mode_w"], True);
+        if mode is None {
+            return None;
+        }
+        ok = self.builder.icmp_signed(
+            ">=", mode, ir.Constant(i64, 0), name="ospath.islink.ok"
+        );
+        fmt = self.builder.and_(
+            mode, ir.Constant(i64, 0o170000), name="ospath.islink.fmt"
+        );
+        kind = self.builder.icmp_signed(
+            "==", fmt, ir.Constant(i64, 0o120000), name="ospath.islink.kind"
+        );
+        return self.builder.and_(ok, kind, name="ospath.islink");
+    }
+
     if (name == "isfile" or name == "isdir") and params {
         p = self._codegen_expr(params[0]);
         if p is None {
             return None;
         }
-
-        buf = self.builder.alloca(ir.ArrayType(i8, 144), name="stat.buf");
-        bufp = self.builder.gep(
-            buf, [ir.Constant(i32, 0), ir.Constant(i32, 0)], name="stat.bufp"
+        layout = self._stat_offsets();
+        mode = self._emit_stat_field(p, layout["mode"], layout["mode_w"]);
+        if mode is None {
+            return None;
+        }
+        ok = self.builder.icmp_signed(
+            ">=", mode, ir.Constant(i64, 0), name=f"ospath.{name}.ok"
         );
-        fn = self._get_or_declare_extern("stat", i32, [i8p, i8p]);
-        rc = self.builder.call(fn, [p, bufp], name="ospath.stat");
-        ok = self.builder.icmp_signed("==", rc, ir.Constant(i32, 0), name="stat.ok");
-        mode_p8 = self.builder.gep(bufp, [ir.Constant(i64, 24)], name="stat.modep8");
-        mode_p = self.builder.bitcast(mode_p8, i32.as_pointer(), name="stat.modep");
-        mode = self.builder.load(mode_p, name="stat.mode");
-        fmt = self.builder.and_(mode, ir.Constant(i32, 0o170000), name="stat.fmt");
+        fmt = self.builder.and_(
+            mode, ir.Constant(i64, 0o170000), name=f"ospath.{name}.fmt"
+        );
         want = 0o040000 if name == "isdir" else 0o100000;
         kind = self.builder.icmp_signed(
-            "==", fmt, ir.Constant(i32, want), name=f"ospath.{name}.kind"
+            "==", fmt, ir.Constant(i64, want), name=f"ospath.{name}.kind"
         );
         return self.builder.and_(ok, kind, name=f"ospath.{name}");
     }
 
+    if name in ["getsize", "inode", "nlink", "blocks", "getmtime", "device"] and params {
+        p = self._codegen_expr(params[0]);
+        if p is None {
+            return None;
+        }
+        layout = self._stat_offsets();
+        field = layout["size"];
+        width = 64;
+        if name == "inode" {
+            field = layout["ino"];
+            width = layout["ino_w"];
+        } elif name == "device" {
+            field = layout["dev"];
+            width = layout["dev_w"];
+        } elif name == "nlink" {
+            field = layout["nlink"];
+            width = layout["nlink_w"];
+        } elif name == "blocks" {
+            field = layout["blocks"];
+        } elif name == "getmtime" {
+            field = layout["mtime"];
+        }
+        value = self._emit_stat_field(p, field, width);
+        if value is None {
+            return None;
+        }
+        if name == "getmtime" {
+            return self.builder.sitofp(
+                value, ir.DoubleType(), name="ospath.getmtime"
+            );
+        }
+        return value;
+    }
+
+    if name == "freebytes" and params {
+        p = self._codegen_expr(params[0]);
+        if p is None {
+            return None;
+        }
+        layout = self._stat_offsets();
+        buf = self.builder.alloca(
+            ir.ArrayType(i8, layout["fsbufsize"]), name="statfs.buf"
+        );
+        bufp = self.builder.gep(
+            buf, [ir.Constant(i32, 0), ir.Constant(i32, 0)], name="statfs.bufp"
+        );
+        fn = self._get_or_declare_extern(layout["fssym"], i32, [i8p, i8p]);
+        rc = self.builder.call(fn, [p, bufp], name="statfs.call");
+        ok = self.builder.icmp_signed(
+            "==", rc, ir.Constant(i32, 0), name="statfs.ok"
+        );
+        unit_p8 = self.builder.gep(
+            bufp, [ir.Constant(i64, layout["fs_bsize"])], name="statfs.unitp8"
+        );
+        unit_p = self.builder.bitcast(
+            unit_p8,
+            ir.IntType(layout["fs_bsize_w"]).as_pointer(),
+            name="statfs.unitp"
+        );
+        unit_raw = self.builder.load(unit_p, name="statfs.unit.raw");
+        unit = unit_raw if layout["fs_bsize_w"] == 64 else self.builder.zext(
+            unit_raw, i64, name="statfs.unit"
+        );
+        avail_p8 = self.builder.gep(
+            bufp, [ir.Constant(i64, layout["fs_bavail"])], name="statfs.availp8"
+        );
+        avail_p = self.builder.bitcast(
+            avail_p8, i64.as_pointer(), name="statfs.availp"
+        );
+        avail = self.builder.load(avail_p, name="statfs.avail");
+        total = self.builder.mul(unit, avail, name="statfs.total");
+        return self.builder.select(
+            ok, total, ir.Constant(i64, -1), name="ospath.freebytes"
+        );
+    }
+
     return None;
+}
+
+"""Byte offsets of the `struct stat` and `struct statfs` fields we read.
+
+The layouts differ by platform and, on Linux, by architecture, so they are
+selected from the target triple rather than assumed. Getting one wrong reads a
+neighbouring field and returns a confident wrong number, so every offset here is
+checked by tests against the values the C library itself reports.
+"""
+impl NaIRGenPass._stat_offsets -> dict {
+    triple = str(self.llvm_module.triple or "").lower();
+    is_darwin = ("darwin" in triple) or ("apple" in triple) or ("macos" in triple);
+    is_arm = ("aarch64" in triple) or ("arm64" in triple);
+
+    if is_darwin {
+        suffix = "$INODE64" if "x86_64" in triple else "";
+        return {
+            "sym": "stat" + suffix,
+            "lsym": "lstat" + suffix,
+            "fssym": "statfs" + suffix,
+            "bufsize": 256,
+            "fsbufsize": 2304,
+            "dev": 0, "dev_w": 32,
+            "ino": 8, "ino_w": 64,
+            "nlink": 6, "nlink_w": 16,
+            "mode": 4, "mode_w": 16,
+            "size": 96,
+            "blocks": 104,
+            "mtime": 48,
+            "fs_bsize": 0, "fs_bsize_w": 32,
+            "fs_bavail": 24,
+            "dname": 21
+        };
+    }
+
+    if is_arm {
+        return {
+            "sym": "stat", "lsym": "lstat", "fssym": "statfs",
+            "bufsize": 256, "fsbufsize": 256,
+            "dev": 0, "dev_w": 64,
+            "ino": 8, "ino_w": 64,
+            "nlink": 20, "nlink_w": 32,
+            "mode": 16, "mode_w": 32,
+            "size": 48,
+            "blocks": 64,
+            "mtime": 88,
+            "fs_bsize": 8, "fs_bsize_w": 64,
+            "fs_bavail": 32,
+            "dname": 19
+        };
+    }
+
+    return {
+        "sym": "stat", "lsym": "lstat", "fssym": "statfs",
+        "bufsize": 256, "fsbufsize": 256,
+        "dev": 0, "dev_w": 64,
+        "ino": 8, "ino_w": 64,
+        "nlink": 16, "nlink_w": 64,
+        "mode": 24, "mode_w": 32,
+        "size": 48,
+        "blocks": 64,
+        "mtime": 88,
+        "fs_bsize": 8, "fs_bsize_w": 64,
+        "fs_bavail": 32,
+        "dname": 19
+    };
+}
+
+"""Stats `pathval` and loads one field, widened to i64. Yields -1 if stat fails."""
+impl NaIRGenPass._emit_stat_field(
+    pathval: ir.Value, offset: int, width: int, use_lstat: bool = False
+) -> (ir.Value | None) {
+    i8 = ir.IntType(8);
+    i8p = ir.IntType(8).as_pointer();
+    i32 = ir.IntType(32);
+    i64 = ir.IntType(64);
+    layout = self._stat_offsets();
+    sym = layout["lsym"] if use_lstat else layout["sym"];
+
+    buf = self.builder.alloca(
+        ir.ArrayType(i8, layout["bufsize"]), name="statfield.buf"
+    );
+    bufp = self.builder.gep(
+        buf, [ir.Constant(i32, 0), ir.Constant(i32, 0)], name="statfield.bufp"
+    );
+    fn = self._get_or_declare_extern(sym, i32, [i8p, i8p]);
+    rc = self.builder.call(fn, [pathval, bufp], name="statfield.call");
+    ok = self.builder.icmp_signed(
+        "==", rc, ir.Constant(i32, 0), name="statfield.ok"
+    );
+    fieldp8 = self.builder.gep(
+        bufp, [ir.Constant(i64, offset)], name="statfield.p8"
+    );
+    fieldp = self.builder.bitcast(
+        fieldp8, ir.IntType(width).as_pointer(), name="statfield.p"
+    );
+    raw = self.builder.load(fieldp, name="statfield.raw");
+    wide = raw if width == 64 else self.builder.zext(raw, i64, name="statfield.wide");
+    return self.builder.select(
+        ok, wide, ir.Constant(i64, -1), name="statfield.res"
+    );
 }

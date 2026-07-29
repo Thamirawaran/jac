@@ -38,6 +38,7 @@ glob NATIVE_OS_FUNCS: set[str] = {
          "unlink",
          "rename",
          "system",
+         "listdir",
 
      };
 
@@ -821,6 +822,10 @@ obj NaIRGenPass(ModuleCodegenPass) {
     def _emit_os_call(name: str, nd: uni.FuncCall) -> (ir.Value | None);
     def _emit_os_environ_call(name: str, nd: uni.FuncCall) -> (ir.Value | None);
     def _emit_ospath_call(name: str, nd: uni.FuncCall) -> (ir.Value | None);
+    def _stat_offsets -> dict;
+    def _emit_stat_field(
+        pathval: ir.Value, offset: int, width: int, use_lstat: bool = False
+    ) -> (ir.Value | None);
     def _mt_ensure -> None;
     def _emit_random_call(name: str, nd: uni.FuncCall) -> (ir.Value | None);
     def _emit_struct_call(name: str, nd: uni.FuncCall) -> (ir.Value | None);
