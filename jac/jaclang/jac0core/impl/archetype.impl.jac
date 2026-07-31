@@ -30,7 +30,10 @@ impl ObjectSpatialDestination.edge_filter(arch: Archetype) -> bool {
 }
 
 impl ObjectSpatialDestination.node_filter(arch: Archetype) -> bool {
-    return (not self.nd or self.nd(arch));
+    return (
+        (not self.nd or self.nd(arch))
+        and (not self.residual or self.residual(arch))
+    );
 }
 
 impl ObjectSpatialPath.init(

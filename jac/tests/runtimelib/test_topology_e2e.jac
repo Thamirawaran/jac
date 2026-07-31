@@ -475,3 +475,96 @@ test "non-final node predicate in multi-hop chain applies at runtime" {
         set_config(JacConfig());
     }
 }
+
+
+test "inline type filter plus trailing field predicate keeps both" {
+    cfg = JacConfig();
+    cfg.run.topology_index = True;
+    set_config(cfg);
+    ctx = ExecutionContext();
+    JacRuntime.set_context(ctx);
+    try {
+        r = root;
+        for i in [1, 2, 3] {
+            r ++> TypeA(val=i);
+        }
+        # Decoy shares the matching `val`, so a result containing it proves
+        # the type constraint was dropped rather than the predicate.
+        r ++> TypeB(val=2);
+
+        nested = sorted([n.val for n in [r-->[?:TypeA, val == 2]]]);
+        chained = sorted([n.val for n in [r-->][?:TypeA][?val == 2]]);
+        mixed = sorted([n.val for n in [r-->[?:TypeA]][?val == 2]]);
+
+        assert nested == [2] , f"nested form broken: {nested}";
+        assert chained == [2] , f"chained form broken: {chained}";
+        assert mixed == nested , (
+            f"`[r-->[?:TypeA]][?val == 2]` must not drop the trailing "
+            f"predicate; got {mixed}, expected {nested}"
+        );
+
+        types = sorted([type(n).__name__ for n in [r-->[?:TypeA]][?val == 2]]);
+        assert types == ['TypeA'] , (
+            f"mixed form must not return wrong-type nodes; got {types}"
+        );
+    } finally {
+        ctx.close();
+        set_config(JacConfig());
+    }
+}
+
+
+test "mixed inline and trailing filter matches index-disabled result" {
+    cfg = JacConfig();
+    cfg.run.topology_index = False;
+    set_config(cfg);
+    ctx = ExecutionContext();
+    JacRuntime.set_context(ctx);
+    try {
+        r = root;
+        for i in [1, 2, 3] {
+            r ++> TypeA(val=i);
+        }
+        r ++> TypeB(val=2);
+
+        mixed = sorted([n.val for n in [r-->[?:TypeA]][?val == 2]]);
+        assert mixed == [2] , (
+            f"index-off parity: mixed form should yield [2], got {mixed}"
+        );
+    } finally {
+        ctx.close();
+        set_config(JacConfig());
+    }
+}
+
+
+test "composed trailing predicates all survive the index fast path" {
+    cfg = JacConfig();
+    cfg.run.topology_index = True;
+    set_config(cfg);
+    ctx = ExecutionContext();
+    JacRuntime.set_context(ctx);
+    try {
+        r = root;
+        for i in range(1, 7) {
+            r ++> TypeA(val=i);
+        }
+        r ++> TypeB(val=3);
+
+        both = sorted([n.val for n in [r-->[?:TypeA]][?val > 1][?val < 4]]);
+        assert both == [2, 3] , (
+            f"every composed trailing predicate must be retained; got {both}"
+        );
+
+        # A slice must be applied after the residual predicate, never before.
+        # Ordering under a predicate is unspecified, so assert membership.
+        sliced = [n.val for n in [r-->[?:TypeA]][?val > 4][0:1]];
+        assert len(sliced) == 1 , f"slice should yield one node, got {sliced}";
+        assert sliced[0] in [5, 6] , (
+            f"slice must run after the predicate; got {sliced}"
+        );
+    } finally {
+        ctx.close();
+        set_config(JacConfig());
+    }
+}

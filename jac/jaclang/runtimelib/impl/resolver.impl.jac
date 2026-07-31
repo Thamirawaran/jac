@@ -226,7 +226,10 @@ impl resolve_path_anchors(
         current = _resolve_prefix(mem, current, chain[:-1], idx);
     }
     last_hop = chain[-1];
-    last_has_post_filter = _filter_has_predicates(last_hop.dest.nd);
+    last_has_post_filter = (
+        _filter_has_predicates(last_hop.dest.nd)
+        or last_hop.dest.residual is not None
+    );
     post_filter: (Callable[[Archetype], bool] | None) = (
         last_hop.dest.node_filter if last_has_post_filter else None
     );
@@ -246,12 +249,16 @@ impl resolve_path_anchors(
             chain=[],
             id_in=result,
             node_type_final=last_hop.node_type,
-            slc=slc,
+            slc=None if post_filter is not None else slc,
             post_filter=post_filter,
         );
         if plan.needs() <= mem.capabilities() {
             _trace_final('pushdown', len(result));
-            return _try_pushdown(mem, plan);
+            pushed = _try_pushdown(mem, plan);
+            if post_filter is not None and slc is not None {
+                pushed = pushed[slc];
+            }
+            return pushed;
         }
     }
     _trace_final('floor', len(result));

@@ -1088,9 +1088,11 @@ impl JacGraph.refs(
         last = path.destinations[-1];
         if last.nd is None {
             last.nd = post_filter;
+        } elif last.residual is None {
+            last.residual = post_filter;
         } else {
-            orig_nd = last.nd;
-            last.nd = lambda (i: any) { orig_nd(i) and post_filter(i); };
+            prior = last.residual;
+            last.residual = lambda (i: any) { prior(i) and post_filter(i); };
         }
     }
 
