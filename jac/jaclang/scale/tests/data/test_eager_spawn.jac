@@ -361,6 +361,10 @@ test "peer url: a blank env value raises instead of resolving to an empty URL" {
 
 # _ensure_available registers what it resolves, so a blank value must not become
 # a registration or every later lookup would return the empty URL from cache.
+# _PROBE has no file behind it, so the spawn fallback is expected to fail:
+# reaching it is what proves the blank was skipped rather than registered, and
+# catching RuntimeError alone keeps an earlier unrelated failure from passing
+# this test vacuously.
 test "peer url: a blank env value is never registered" {
     key = __jac_sv.peer_url_env_key(_PROBE);
     saved = os.environ.get(key);
@@ -368,14 +372,19 @@ test "peer url: a blank env value is never registered" {
         __jac_sv.unregister(_PROBE);
         os.environ[key] = "  ";
 
+        raised = "";
         try {
             __jac_sv._ensure_available(_PROBE);
-        } except Exception {
-            ;
+        } except RuntimeError as err {
+            raised = str(err);
         }
 
         assert _PROBE not in __jac_sv._registry , (
             "a blank override was cached as a registration"
+        );
+        assert _PROBE in raised , (
+            f"expected the spawn fallback to run and fail for '{_PROBE}', "
+            + f"got: {raised}"
         );
     } finally {
         _probe_env_restore(saved);
