@@ -476,3 +476,29 @@ test "url_for derives when no override is set" {
         _peer_env_restore(saved);
     }
 }
+
+
+# Rollback depth (#8089) rode the Kubernetes default of 10 because the field was
+# never set. Declaring it makes the depth something a consumer can read back and
+# reason about before offering a rollback it cannot honor.
+test "every deployment declares its revision history limit" {
+    cfg = KubernetesConfig(app_name="littlex", namespace="ns");
+    builder = ManifestBuilder(k8s_config=cfg);
+
+    for name in ["littlex", GATEWAY_NAME] {
+        manifest = builder._build_deployment_manifest(name, {});
+        assert manifest["spec"]["revisionHistoryLimit"] == 10;
+    }
+}
+
+
+test "a configured revision history limit reaches the deployment" {
+    cfg = KubernetesConfig(
+        app_name="littlex", namespace="ns", revision_history_limit=3
+    );
+    builder = ManifestBuilder(k8s_config=cfg);
+
+    manifest = builder._build_deployment_manifest("littlex", {});
+
+    assert manifest["spec"]["revisionHistoryLimit"] == 3;
+}
