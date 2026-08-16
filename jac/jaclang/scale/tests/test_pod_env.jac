@@ -1,5 +1,7 @@
+import io;
 import os;
 import json;
+import logging;
 import unittest.mock as mock;
 import from pathlib { Path }
 import from jaclang.scale.deploy.target.kubernetes.manifest_builder {
@@ -18,7 +20,7 @@ import from jaclang.scale.runtime.gateway.service_registry {
     ServiceRegistry,
     ServiceEntry
 }
-import from jaclang.runtimelib.sv_client { peer_url_env_key }
+import from jaclang.runtimelib.sv_client { peer_url_env_key, peer_url_from_env }
 
 
 glob _K8S_E2E_FIXTURE: Path = Path(__file__).parent / "fixtures" / "k8s_e2e",
@@ -344,6 +346,45 @@ test "the injected default equals the derived URL under matching config" {
             "change behavior for existing pods"
         );
     } finally {
+        _peer_env_restore(saved);
+    }
+}
+
+
+# peer_url_from_env warns when an override is not an absolute URL. Every value
+# the builder injects goes through that check on a normal deploy, so a warning
+# here would mean the reader rejecting the writer's own output on every pod
+# start. Driven through the real builder rather than a hand-written URL, so a
+# change to the injected form is caught here.
+test "no injected peer URL trips the not-an-absolute-URL warning" {
+    saved = _peer_env_snapshot();
+    log = logging.getLogger("jaclang.runtimelib.sv_client");
+    buf = io.StringIO();
+    handler = logging.StreamHandler(buf);
+    log.addHandler(handler);
+    try {
+        _peer_env_isolate();
+        cart_env = _peer_env_of("cart_app");
+
+        injected = {
+            k: v
+            for (k, v) in cart_env.items()
+            if k.startswith("JAC_SV_") and k.endswith("_URL")
+        };
+        assert injected , "the builder injected no peer URLs to check";
+
+        for (key, value) in injected.items() {
+            os.environ[key] = value;
+        }
+        for name in _PEER_ROUTES.keys() {
+            peer_url_from_env(name);
+        }
+
+        assert buf.getvalue() == "" , (
+            f"the reader warned about the builder's own output: {buf.getvalue()}"
+        );
+    } finally {
+        log.removeHandler(handler);
         _peer_env_restore(saved);
     }
 }
