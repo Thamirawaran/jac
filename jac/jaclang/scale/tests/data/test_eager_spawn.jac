@@ -1,7 +1,9 @@
+import io;
 import os;
 import sys;
 import shutil;
 import glob;
+import logging;
 import tempfile;
 import from pathlib { Path }
 import from jaclang { JacRuntime as Jac }
@@ -376,6 +378,55 @@ test "peer url: a blank env value is never registered" {
             "a blank override was cached as a registration"
         );
     } finally {
+        _probe_env_restore(saved);
+    }
+}
+
+
+# A non-blank override is used verbatim, so one without a scheme reaches the
+# registry and only fails at the first call, far from the variable that caused
+# it. Warn rather than raise: a typo must not stop a pod from starting, and
+# unlike a blank there is nothing to fall back to.
+test "peer url: a schemeless override warns and is still used" {
+    key = __jac_sv.peer_url_env_key(_PROBE);
+    saved = os.environ.get(key);
+    log = logging.getLogger("jaclang.runtimelib.sv_client");
+    buf = io.StringIO();
+    handler = logging.StreamHandler(buf);
+    log.addHandler(handler);
+    try {
+        os.environ[key] = "orders-app-standby-service";
+
+        assert __jac_sv.peer_url_from_env(_PROBE) == "orders-app-standby-service";
+        assert key in buf.getvalue() , (
+            f"the warning should name the variable to fix, got: {buf.getvalue()}"
+        );
+    } finally {
+        log.removeHandler(handler);
+        _probe_env_restore(saved);
+    }
+}
+
+
+test "peer url: an absolute override warns about nothing" {
+    key = __jac_sv.peer_url_env_key(_PROBE);
+    saved = os.environ.get(key);
+    log = logging.getLogger("jaclang.runtimelib.sv_client");
+    buf = io.StringIO();
+    handler = logging.StreamHandler(buf);
+    log.addHandler(handler);
+    try {
+        os.environ[key] = "http://orders-app-standby-service:8000";
+        __jac_sv.peer_url_from_env(_PROBE);
+
+        os.environ[key] = "";
+        __jac_sv.peer_url_from_env(_PROBE);
+
+        assert buf.getvalue() == "" , (
+            f"a usable value should warn about nothing, got: {buf.getvalue()}"
+        );
+    } finally {
+        log.removeHandler(handler);
         _probe_env_restore(saved);
     }
 }

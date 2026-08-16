@@ -1,8 +1,11 @@
 import os;
+import logging;
+import from urllib.parse { urlsplit }
 
 glob _registry: dict[str, str] = {},
      _test_clients: dict[str, any] = {},
-     _consumer_providers: dict[str, list[str]] = {};
+     _consumer_providers: dict[str, list[str]] = {},
+     logger = logging.getLogger(__name__);
 
 def headless_start_args(entry_file: str, port: int) -> list[str] {
     return ["start", entry_file, "--port", str(port), "--no-client"];
@@ -48,7 +51,18 @@ def peer_url_env_key(module_name: str) -> str {
 }
 
 def peer_url_from_env(module_name: str) -> str {
-    return os.environ.get(peer_url_env_key(module_name), "").strip();
+    key = peer_url_env_key(module_name);
+    url = os.environ.get(key, "").strip();
+    if url {
+        parts = urlsplit(url);
+        if not (parts.scheme and parts.netloc) {
+            logger.warning(
+                f"{key} is not an absolute URL like http://host:port, so calls "
+                    + f"to '{module_name}' will fail at connect time"
+            );
+        }
+    }
+    return url;
 }
 
 def resolve_url(module_name: str) -> str {
