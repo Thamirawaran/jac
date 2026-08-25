@@ -293,6 +293,85 @@ impl install_warning_filters -> None {
     }
 }
 
+impl _limit_from_text(text: str) -> int {
+    raw = text.strip();
+    if (not raw) or (raw == "max") {
+        return 0;
+    }
+    try {
+        value = int(raw);
+    } except ValueError {
+        return 0;
+    }
+    return value if (value > 0) and (value < (1 << 60)) else 0;
+}
+
+impl _cgroup_limit_bytes -> int {
+    for path in [
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes"
+    ] {
+        try {
+            with open(path, encoding="utf-8") as f {
+                limit = _limit_from_text(f.read());
+            }
+            if limit {
+                return limit;
+            }
+        } except Exception {
+            ;
+        }
+    }
+    return 0;
+}
+
+impl _cgroup_available_bytes -> int {
+    limit = _cgroup_limit_bytes();
+    if not limit {
+        return 0;
+    }
+    used = 0;
+    for path in [
+        "/sys/fs/cgroup/memory.current",
+        "/sys/fs/cgroup/memory/memory.usage_in_bytes"
+    ] {
+        try {
+            with open(path, encoding="utf-8") as f {
+                used = int(f.read().strip());
+            }
+            break;
+        } except Exception {
+            used = 0;
+        }
+    }
+    return max(0, limit - used);
+}
+
+impl _shed_threshold(mem_start: int) -> int {
+    return max(int(mem_start * _MEM_SHED_FRACTION), 2 * _MEM_FLOOR_BYTES);
+}
+
+impl _mem_budget_bytes -> int {
+    return int(_mem_available_bytes() * _MEM_HEADROOM);
+}
+
+impl _rss_cap_for(budget: int, jobs: int) -> int {
+    share = (budget // max(1, jobs)) if budget else _WORKER_MEM_BYTES;
+    return int(share // (1024 * 1024));
+}
+
+impl _resolve_rss_cap(jobs: int) -> int {
+    raw = os.environ.get("JAC_TEST_RECYCLE_MB", "");
+    if raw {
+        try {
+            return max(0, int(raw));
+        } except ValueError {
+            ;
+        }
+    }
+    return _rss_cap_for(_mem_budget_bytes(), jobs);
+}
+
 impl _mem_available_bytes -> int {
     avail = 0;
     try {
@@ -306,6 +385,17 @@ impl _mem_available_bytes -> int {
         }
     } except Exception {
         avail = 0;
+    }
+    if not avail {
+        try {
+            avail = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE");
+        } except Exception {
+            avail = 0;
+        }
+    }
+    cg = _cgroup_available_bytes();
+    if cg and ((not avail) or (cg < avail)) {
+        avail = cg;
     }
     return avail;
 }
@@ -335,29 +425,10 @@ impl _loadavg -> float {
 
 impl default_jobs -> int {
     cpus = os.cpu_count() or 1;
-    avail = 0;
-    try {
-        with open("/proc/meminfo", encoding="utf-8") as f {
-            for line in f {
-                if line.startswith("MemAvailable:") {
-                    avail = int(line.split()[1]) * 1024;
-                    break;
-                }
-            }
-        }
-    } except Exception {
-        avail = 0;
-    }
-    if not avail {
-        try {
-            avail = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE");
-        } except Exception {
-            avail = 0;
-        }
-    }
+    budget = _mem_budget_bytes();
     cap = cpus;
-    if avail {
-        cap = max(1, int((avail * _MEM_HEADROOM) // _WORKER_MEM_BYTES));
+    if budget {
+        cap = max(1, int(budget // _WORKER_MEM_BYTES));
     }
     return max(1, min(cpus, cap, _MAX_AUTO_JOBS));
 }
@@ -422,6 +493,10 @@ impl _log_worker_footprint(
 impl _worker_rss_mb -> int {
     import resource;
     import sys;
+    mine = _pid_rss_mb(os.getpid());
+    if mine {
+        return mine;
+    }
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss;
     return int(peak // (1024 * 1024))
         if sys.platform == "darwin"
@@ -917,6 +992,9 @@ impl ForkPool.postinit -> None {
     self.started = time.monotonic();
     self.mem_last = 0.0;
     self.mem_trail = [];
+    self.mem_start = 0;
+    self.shed_pending = 0;
+    self.rss_cap_mb = _resolve_rss_cap(self.jobs);
 }
 
 impl ForkPool._memory_watchdog -> None {
@@ -945,18 +1023,31 @@ impl ForkPool._memory_watchdog -> None {
     self.mem_trail.append(line);
     sys.stderr.write(line + "\n");
     sys.stderr.flush();
-    starved = (avail > 0) and (avail < _MEM_FLOOR_BYTES);
-    if not starved and (elapsed < _MEM_DEADLINE_SECONDS) {
+    if self.mem_start == 0 {
+        self.mem_start = avail;
+    }
+    if (
+        (avail > 0)
+        and (live > 1)
+        and (self.shed_pending == 0)
+        and (avail < _shed_threshold(self.mem_start))
+    ) {
+        self.shed_pending = 1;
+        sys.stderr.write(
+            f"[mem] shedding one of {live} workers: "
+            f"{avail // (1024 * 1024)} MB left of the "
+            f"{self.mem_start // (1024 * 1024)} MB this run started with\n"
+        );
+        sys.stderr.flush();
+    }
+    if (avail <= 0) or (avail >= _MEM_FLOOR_BYTES) {
         return;
     }
-    why = (
-        f"available memory fell to {avail // (1024 * 1024)} MB"
-            if starved
-            else f"the run passed {int(_MEM_DEADLINE_SECONDS)}s without finishing"
-    );
     sys.stderr.write(
-        f"\n[mem] STOPPING: {why}. The runner is killed at this point with no "
-        f"step log, so the pool stops here and reports instead.\n"
+        f"\n[mem] STOPPING: available memory fell to "
+        f"{avail // (1024 * 1024)} MB with {live} worker(s) holding {rss} MB. "
+        f"The runner is killed at this point with no step log, so the pool "
+        f"stops here and reports instead.\n"
     );
     for sample in self.mem_trail[-40:] {
         sys.stderr.write("  " + sample + "\n");
@@ -1045,12 +1136,7 @@ impl ForkPool._worker_loop(dispatch_fd: int, result_fd: int) -> None {
     } except ValueError {
         _recycle = 25;
     }
-    _rss_cap = 8192;
-    try {
-        _rss_cap = int(os.environ.get("JAC_TEST_RECYCLE_MB", "8192") or "8192");
-    } except ValueError {
-        _rss_cap = 8192;
-    }
+    _rss_cap = self.rss_cap_mb;
     _served = 0;
     reader = os.fdopen(dispatch_fd, "r", encoding="utf-8");
     while True {
@@ -1155,6 +1241,19 @@ impl ForkPool._handle_record(kid: dict[(str, any)], line: str) -> None {
     _log_worker_footprint(kid, record, self.plan.files, done);
     for item in record.get("outcomes", []) {
         self.reporter.record(TestOutcome.from_wire(item));
+    }
+    live = len(
+        [
+            k
+            for k in self.kids
+            if k["alive"]
+        ]
+    );
+    if (self.shed_pending > 0) and (live > 1) and not record.get("retire") {
+        self.shed_pending -= 1;
+        kid["retired"] = True;
+        self._reap(kid);
+        return;
     }
     if record.get("retire") {
         kid["retired"] = True;

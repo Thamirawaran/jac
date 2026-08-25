@@ -29,11 +29,11 @@ glob _WARNING_IGNORES: list[tuple[str, str, str]] = [
          ("", "DeprecationWarning", "jaclang.vendor.cattrs")
      ];
 
-glob _WORKER_MEM_BYTES: int = 2 * 1024 * 1024 * 1024,
+glob _WORKER_MEM_BYTES: int = 3 * 1024 * 1024 * 1024,
      _MEM_HEADROOM: float = 0.6,
      _MEM_POLL_SECONDS: float = 5.0,
      _MEM_FLOOR_BYTES: int = 1536 * 1024 * 1024,
-     _MEM_DEADLINE_SECONDS: float = 1500.0,
+     _MEM_SHED_FRACTION: float = 0.3,
      _MAX_AUTO_JOBS: int = 12,
      _PROGRESS_WIDTH: int = 72;
 
@@ -105,7 +105,10 @@ obj ForkPool {
         kids: list[dict[(str, any)]] postinit,
         started: float postinit,
         mem_last: float postinit,
-        mem_trail: list[str] postinit;
+        mem_trail: list[str] postinit,
+        mem_start: int postinit,
+        shed_pending: int postinit,
+        rss_cap_mb: int postinit;
 
     def postinit -> None;
     def run -> None;
@@ -156,6 +159,20 @@ def run_tests(
 ) -> int;
 
 def default_jobs -> int;
+
+def _limit_from_text(text: str) -> int;
+
+def _cgroup_limit_bytes -> int;
+
+def _cgroup_available_bytes -> int;
+
+def _shed_threshold(mem_start: int) -> int;
+
+def _mem_budget_bytes -> int;
+
+def _rss_cap_for(budget: int, jobs: int) -> int;
+
+def _resolve_rss_cap(jobs: int) -> int;
 
 def _mem_available_bytes -> int;
 
